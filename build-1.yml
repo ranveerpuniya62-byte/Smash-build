@@ -1,0 +1,82 @@
+name: Build Candy Smash
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract project from zip
+        run: |
+          f=""
+          if [ -f candysmash.dat ]; then f=candysmash.dat; else f=$(ls *.zip 2>/dev/null | head -n1); fi
+          if [ -n "$f" ]; then
+            rm -rf project
+            mkdir -p project
+            unzip -q -o "$f" -d project
+            echo "Extracted $f"
+          else
+            echo "No candysmash.dat / zip found, using repo files as they are."
+          fi
+
+      - name: Find Gradle project folder
+        id: proj
+        run: |
+          f=$(find . -maxdepth 4 -name 'settings.gradle*' -not -path './.git/*' | head -n1)
+          if [ -z "$f" ]; then
+            echo "settings.gradle NOT FOUND. Files in repo:"
+            find . -maxdepth 4 -not -path './.git/*' | head -80
+            exit 1
+          fi
+          d=$(dirname "$f")
+          echo "Gradle project folder: $d"
+          echo "dir=$d" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Decode signing key (only if secrets are set)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/upload-keystore.jks" >> "$GITHUB_ENV"
+            echo "Signing key found."
+          else
+            echo "No signing key set: release AAB will be unsigned."
+          fi
+
+      - name: Build debug APK and release AAB
+        working-directory: ${{ steps.proj.outputs.dir }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleDebug bundleRelease --no-daemon
+
+      - name: Upload APK (test ads, for phone testing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CandySmash-apk
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+
+      - name: Upload release AAB (real ads, for Play Console)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CandySmash-release-aab
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/bundle/release/*.aab
